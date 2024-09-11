@@ -1,13 +1,10 @@
 #include "editor.h"
-#include <asm-generic/errno-base.h>
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#define CTRL_KEY(k) ((k) & 0x1f)
 
 struct editorConfig E;
 
@@ -39,10 +36,10 @@ void enableRawMode() {
 }
 
 char editorReadKey() {
-  int nRead;
+  int nread;
   char c;
-  while ((nRead == read(STDIN_FILENO, &c, 1)) != 1) {
-    if (nRead == -1 && errno != EAGAIN)
+  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    if (nread == -1 && errno != EAGAIN)
       die("read");
   }
   return c;
@@ -69,6 +66,8 @@ void editorMoveCursor(char key) {
   case 'h':
     if (E.cx != 0) {
       E.cx--;
+    } else if (E.cy > 0) {
+      E.cy--;
       E.cx = E.row[E.cy].length;
     }
     break;
@@ -93,16 +92,39 @@ void editorMoveCursor(char key) {
   }
   row = (E.cy >= E.numRows) ? NULL : &E.row[E.cy];
   int rowlen = row ? row->length : 0;
-  if (E.cx > rowlen)
+  if (E.cx > rowlen) {
     E.cx = rowlen;
+  }
 }
 
 void editorDrawRows() {
-  int i;
-  for (i = 0; i < E.numRows; i++) {
-    write(STDOUT_FILENO, E.row[i].chars, E.row[i].length);
+  int y;
+  for (y = 0; y < E.numRows; y++) {
+    write(STDOUT_FILENO, E.row[y].chars, E.row[y].length);
     write(STDOUT_FILENO, "\r\n", 2);
   }
+}
+
+void editorDrawStatusBar() {
+  char status[80];
+  int len = snprintf(status, sizeof(status), "%.20s - %s mode", E.statusmsg,
+                     E.mode == MODE_NORMAL ? "NORMAL" : "INSERT");
+  write(STDOUT_FILENO, "\x1b[7m", 4);
+  write(STDOUT_FILENO, status, len);
+  write(STDOUT_FILENO, "\x1b[m", 3);
+  write(STDOUT_FILENO, "\r\n", 2);
+}
+
+void editorRefreshScreen() {
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  write(STDOUT_FILENO, "\x1b[H", 3);
+
+  editorDrawRows();
+  editorDrawStatusBar();
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+  write(STDOUT_FILENO, buf, strlen(buf));
 }
 
 int editorProcessNormalMode() {
@@ -126,58 +148,16 @@ int editorProcessNormalMode() {
   }
 }
 
-int editorProcessKeypress() {
-  char c = editorReadKey();
-  switch (c) {
-  case ':':
-    strcpy(E.statusmsg, ":");
-    return 1;
-  case 'i':
-    E.mode = MODE_INSERT;
-    strcpy(E.statusmsg, "-- INSERT --");
-    return 1;
-  case 'h':
-  case 'j':
-  case 'k':
-  case 'l':
-    editorMoveCursor(c);
-    return 1;
-  default:
-    return 1;
-  }
-}
-
-void editorDrawStatusBar() {
-  char status[80];
-  int len = snprintf(status, sizeof(status), "%.20s - %s mode", E.statusmsg,
-                     E.mode == MODE_NORMAL ? "NORMAL" : "INSERT");
-  write(STDOUT_FILENO, "\x1b[7m", 4);
-  write(STDOUT_FILENO, status, len);
-  write(STDOUT_FILENO, "\x1b[m", 3);
-}
-
-void editorRefreshScreen() {
-  write(STDOUT_FILENO, "\x1b[2J", 4);
-  write(STDOUT_FILENO, "\x1b[H", 3);
-
-  editorDrawStatusBar();
-
-  char buf[32];
-  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
-  write(STDOUT_FILENO, buf, strlen(buf));
-}
-
 int editorProcessCommand() {
   static char command[80] = {0};
   static int commandPos = 0;
   char c = editorReadKey();
   if (c == '\r') {
     command[commandPos] = '\0';
-    if (strcpy(E.statusmsg, ":q") == 0) {
-      return 0;
+    if (strcmp(command, ":q") == 0) {
+      return 0; // Exit the editor
     }
-
-    // resetting the command buffer
+    // Reset command buffer
     commandPos = 0;
     strcpy(E.statusmsg, "");
   } else if (isprint(c)) {
@@ -188,9 +168,39 @@ int editorProcessCommand() {
   return 1;
 }
 
+int editorProcessKeypress() {
+  if (E.statusmsg[0] == ':') {
+    return editorProcessCommand();
+  }
+  if (E.mode == MODE_NORMAL) {
+    return editorProcessNormalMode();
+  } else {
+    char c = editorReadKey();
+    switch (c) {
+    case CTRL_KEY('q'):
+      write(STDOUT_FILENO, "\x1b[2J", 4);
+      write(STDOUT_FILENO, "\x1b[H", 3);
+      exit(0);
+      break;
+    case 27: // ESC key
+      E.mode = MODE_NORMAL;
+      strcpy(E.statusmsg, "");
+      break;
+    default:
+      if (isprint(c)) {
+        editorInsertChar(c);
+      }
+      break;
+    }
+    return 1;
+  }
+}
+
 void initEditor() {
   E.cx = 0;
   E.cy = 0;
+  E.numRows = 0;
+  E.row = NULL;
   E.mode = MODE_NORMAL;
   strcpy(E.statusmsg, "");
 }
